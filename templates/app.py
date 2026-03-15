@@ -8,16 +8,17 @@ app = Flask(__name__)
 def index():
     sonuclar = []
     try:
-        # Sadece 5 ana hisse ile test ediyoruz (Hata payını yok etmek için)
+        # 1. TEST İÇİN SABİT LİSTE (Dosya hatasını önlemek için)
         test_hisseler = ["THYAO.IS", "AKBNK.IS", "TUPRS.IS", "ASELS.IS", "EREGL.IS"]
         
-        # Tek tek ve hızlıca çekiyoruz
+        # 2. VERİ ÇEKME (En sade haliyle)
         for hisse in test_hisseler:
             try:
-                t = yf.Ticker(hisse)
-                hist = t.history(period="1d")
-                if not hist.empty:
-                    fiyat = hist['Close'].iloc[-1]
+                # Ticker objesi ile hızlı çekim
+                df = yf.download(hisse, period="5d", interval="1d", progress=False)
+                if not df.empty:
+                    # En son kapanış fiyatını al
+                    fiyat = float(df['Close'].iloc[-1])
                     sonuclar.append({
                         "hisse": hisse.replace(".IS",""),
                         "fiyat": round(fiyat, 2),
@@ -26,12 +27,19 @@ def index():
                         "gecmis": "---",
                         "oncelik": 1
                     })
-            except:
+            except Exception as e:
+                print(f"Hisse hatası ({hisse}): {e}")
                 continue
+                
     except Exception as e:
-        return f"Sunucu Hatası: {str(e)}"
+        # Eğer hala hata varsa ekrana hatayı yazdır ki görelim
+        return f"Uygulama Hatası Detayı: {str(e)}"
 
-    return render_template('index.html', hisseler=sonuclar)
+    # Render_template'in çalışması için 'templates/index.html' MUTLAKA olmalı
+    try:
+        return render_template('index.html', hisseler=sonuclar)
+    except Exception:
+        return "Hata: 'templates/index.html' dosyası GitHub'da bulunamadı!"
 
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 5000))
