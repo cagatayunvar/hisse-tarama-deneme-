@@ -1,5 +1,6 @@
 import os
 import yfinance as yf
+import pandas as pd
 from flask import Flask, render_template
 
 app = Flask(__name__)
@@ -8,38 +9,44 @@ app = Flask(__name__)
 def index():
     sonuclar = []
     try:
-        # 1. TEST İÇİN SABİT LİSTE (Dosya hatasını önlemek için)
-        test_hisseler = ["THYAO.IS", "AKBNK.IS", "TUPRS.IS", "ASELS.IS", "EREGL.IS"]
+        # 1. TEST LİSTESİ (Hata payını azaltmak için sadece 3 tane)
+        hisseler = ["THYAO.IS", "AKBNK.IS", "EREGL.IS"]
         
-        # 2. VERİ ÇEKME (En sade haliyle)
-        for hisse in test_hisseler:
+        # 2. VERİ ÇEKME (En güvenli yöntem)
+        for hisse in hisseler:
             try:
-                # Ticker objesi ile hızlı çekim
-                df = yf.download(hisse, period="5d", interval="1d", progress=False)
-                if not df.empty:
-                    # En son kapanış fiyatını al
-                    fiyat = float(df['Close'].iloc[-1])
-                    sonuclar.append({
-                        "hisse": hisse.replace(".IS",""),
-                        "fiyat": round(fiyat, 2),
-                        "durum": "Sistem Aktif",
-                        "renk_class": "bg-primary",
-                        "gecmis": "---",
-                        "oncelik": 1
-                    })
-            except Exception as e:
-                print(f"Hisse hatası ({hisse}): {e}")
-                continue
+                # Veriyi indir ve sütunları temizle (Multi-index hatasını önler)
+                df = yf.download(hisse, period="1y", interval="1d", progress=False)
+                if df.empty: continue
                 
-    except Exception as e:
-        # Eğer hala hata varsa ekrana hatayı yazdır ki görelim
-        return f"Uygulama Hatası Detayı: {str(e)}"
+                # Sütunları düzelt (Bazı sürümlerde 'Close' yerine ('Close', 'THYAO.IS') gelebiliyor)
+                if isinstance(df.columns, pd.MultiIndex):
+                    df.columns = df.columns.get_level_values(0)
 
-    # Render_template'in çalışması için 'templates/index.html' MUTLAKA olmalı
-    try:
+                fiyat = float(df['Close'].iloc[-1])
+                ema200 = float(df['Close'].ewm(span=200, adjust=False).mean().iloc[-1])
+                
+                durum = "Yükseliş (EMA Üstü)" if fiyat > ema200 else "Düşüş (EMA Altı)"
+                renk = "bg-success" if fiyat > ema200 else "bg-danger"
+                
+                sonuclar.append({
+                    "hisse": hisse.replace(".IS",""),
+                    "fiyat": round(fiyat, 2),
+                    "durum": durum,
+                    "renk_class": renk,
+                    "gecmis": "---",
+                    "oncelik": 1 if fiyat > ema200 else 2
+                })
+            except Exception as e:
+                print(f"{hisse} hatası: {e}")
+                continue
+
+        # 3. SAYFAYI GÖSTER
         return render_template('index.html', hisseler=sonuclar)
-    except Exception:
-        return "Hata: 'templates/index.html' dosyası GitHub'da bulunamadı!"
+
+    except Exception as e:
+        # Hata olursa beyaz ekran yerine burası çalışır
+        return f"Sistem hatası detaylı mesaj: {str(e)}"
 
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 5000))
