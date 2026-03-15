@@ -1,92 +1,72 @@
 from flask import Flask, render_template
 import yfinance as yf
-import pandas_ta as ta
 import pandas as pd
-import warnings
-import os
+import numpy as np
 from concurrent.futures import ThreadPoolExecutor, as_completed
-
-warnings.filterwarnings('ignore')
+import os
 
 app = Flask(__name__)
 
-# TXT dosyasından hisseleri okuyan fonksiyon
 def hisseleri_getir():
-    dosya_yolu = "hisseler.txt"
-    if os.path.exists(dosya_yolu):
-        with open(dosya_yolu, "r", encoding="utf-8") as file:
-            # Satır satır oku, boşlukları temizle ve listeye ekle
-            hisseler = [line.strip() for line in file if line.strip()]
-        return hisseler
-    else:
-        print(f"⚠️ HATA: {dosya_yolu} bulunamadı!")
-        return []
+    if os.path.exists("hisseler.txt"):
+        with open("hisseler.txt", "r", encoding="utf-8") as f:
+            return [line.strip() for line in f if line.strip()]
+    return []
+
+# Dış kütüphane kullanmadan SuperTrend hesaplayan fonksiyon
+def hesapla_supertrend(df, period=10, multiplier=3):
+    hl2 = (df['High'] + df['Low']) / 2
+    atr = (df['High'] - df['Low']).abs().rolling(window=period).mean() # Basit ATR
+    
+    upperband = hl2 + (multiplier * atr)
+    lowerband = hl2 - (multiplier * atr)
+    
+    trend = np.ones(len(df))
+    for i in range(1, len(df)):
+        if df['Close'].iloc[i] > upperband.iloc[i-1]:
+            trend[i] = 1
+        elif df['Close'].iloc[i] < lowerband.iloc[i-1]:
+            trend[i] = -1
+        else:
+            trend[i] = trend[i-1]
+    return trend
 
 def hisse_analiz_et(hisse):
     try:
-        ticker = yf.Ticker(hisse)
-        df = ticker.history(period="1y")
+        df = yf.Ticker(hisse).history(period="1y")
+        if len(df) < 200: return None
         
-        if df.empty or len(df) < 200:
-            return None
-            
-        df.ta.ema(length=200, append=True)
-        df.ta.supertrend(length=10, multiplier=3, append=True)
+        # 200 EMA ve SuperTrend hesapla
+        df['EMA200'] = df['Close'].ewm(span=200, adjust=False).mean()
+        df['ST_YON'] = hesapla_supertrend(df)
         
-        st_yon_sutunu = [col for col in df.columns if col.startswith('SUPERTd')][0]
-        ema_sutunu = [col for col in df.columns if col.startswith('EMA_200')][0]
+        son = df.iloc[-1]
+        once = df.iloc[-2]
         
-        son_gun = df.iloc[-1]
-        onceki_gun = df.iloc[-2]
+        fiyat, ema = son['Close'], son['EMA200']
+        gecmis = "".join(["🟩" if x == 1 else "🟥" for x in df['ST_YON'].tail(5)])
         
-        fiyat = son_gun['Close']
-        ema = son_gun[ema_sutunu]
-        
-        son_5_gun = df.tail(5)
-        gecmis_gorsel = "".join(["🟩" if row[st_yon_sutunu] == 1 else "🟥" for _, row in son_5_gun.iterrows()])
-        
-        if onceki_gun[st_yon_sutunu] == -1 and son_gun[st_yon_sutunu] == 1 and fiyat > ema:
-            durum = "YENİ AL SİNYALİ"
-            renk_class = "bg-success"
-            oncelik = 1
-        elif onceki_gun[st_yon_sutunu] == 1 and son_gun[st_yon_sutunu] == -1 and fiyat < ema:
-            durum = "YENİ SAT SİNYALİ"
-            renk_class = "bg-danger"
-            oncelik = 2
+        if once['ST_YON'] == -1 and son['ST_YON'] == 1 and fiyat > ema:
+            durum, renk, oncelik = "YENİ AL SİNYALİ", "bg-success", 1
+        elif once['ST_YON'] == 1 and son['ST_YON'] == -1 and fiyat < ema:
+            durum, renk, oncelik = "YENİ SAT SİNYALİ", "bg-danger", 2
         else:
-            durum = "Yükseliş Trendi" if son_gun[st_yon_sutunu] == 1 else "Düşüş Trendi"
-            renk_class = "bg-primary" if son_gun[st_yon_sutunu] == 1 else "bg-secondary"
-            oncelik = 3 if son_gun[st_yon_sutunu] == 1 else 4
+            durum = "Yükseliş Trendi" if son['ST_YON'] == 1 else "Düşüş Trendi"
+            renk = "bg-primary" if son['ST_YON'] == 1 else "bg-secondary"
+            oncelik = 3 if son['ST_YON'] == 1 else 4
             
-        return {
-            "hisse": hisse.replace(".IS", ""),
-            "fiyat": round(fiyat, 2),
-            "durum": durum,
-            "renk_class": renk_class,
-            "gecmis": gecmis_gorsel,
-            "oncelik": oncelik
-        }
-    except Exception as e:
-        print(f"Hata ({hisse}): {e}")
-        return None
+        return {"hisse": hisse.replace(".IS",""), "fiyat": round(fiyat,2), "durum": durum, "renk_class": renk, "gecmis": gecmis, "oncelik": oncelik}
+    except: return None
 
 @app.route('/')
 def index():
     sonuclar = []
-    # Hisseleri txt dosyasından taze olarak çek
-    bist_listesi = hisseleri_getir()
-    
-    with ThreadPoolExecutor(max_workers=20) as executor:
-        gelecek_sonuclar = {executor.submit(hisse_analiz_et, hisse): hisse for hisse in bist_listesi}
-        
-        for gelecek in as_completed(gelecek_sonuclar):
-            veri = gelecek.result()
-            if veri is not None:
-                sonuclar.append(veri)
-                
-    sonuclar = sorted(sonuclar, key=lambda x: (x['oncelik'], x['hisse']))
-                
-    return render_template('index.html', hisseler=sonuclar)
+    with ThreadPoolExecutor(max_workers=10) as executor:
+        futures = [executor.submit(hisse_analiz_et, h) for h in hisseleri_getir()]
+        for f in as_completed(futures):
+            res = f.result()
+            if res: sonuclar.append(res)
+    return render_template('index.html', hisseler=sorted(sonuclar, key=lambda x: (x['oncelik'], x['hisse'])))
 
 if __name__ == '__main__':
     app.run(debug=True)
