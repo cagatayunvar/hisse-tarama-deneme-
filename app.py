@@ -6,6 +6,7 @@ from flask import Flask, render_template
 
 app = Flask(__name__)
 
+# Kendi SuperTrend hesaplamamız (Hata payını sıfıra indirir)
 def hesapla_supertrend(df, period=10, multiplier=3):
     if len(df) < period: return np.zeros(len(df))
     hl2 = (df['High'] + df['Low']) / 2
@@ -23,31 +24,31 @@ def hesapla_supertrend(df, period=10, multiplier=3):
 def index():
     sonuclar = []
     try:
+        # 1. Hisseleri oku
         if not os.path.exists("hisseler.txt"):
-            return "Hata: hisseler.txt dosyası bulunamadı!"
-            
+            return "Hata: hisseler.txt bulunamadı!"
         with open("hisseler.txt", "r") as f:
             hisseler = [line.strip() for line in f if line.strip()]
         
-        if not hisseler:
-            return "Hata: Liste boş!"
-
-        # TÜM HİSSELERİ TEK SEFERDE ÇEK (502 hatasını önleyen en hızlı yol)
-        data = yf.download(hisseler, period="1y", interval="1d", group_by='ticker', progress=False)
+        # 2. Hız Sınırı: Test için ilk 15 hisseyi çekelim (Hata almazsak artırırsın)
+        test_listesi = hisseler[:15]
         
-        for hisse in hisseler:
+        # 3. TOPLU VERİ ÇEKME (Zaman aşımını önleyen mucize satır)
+        data = yf.download(test_listesi, period="1y", interval="1d", group_by='ticker', progress=False)
+        
+        for hisse in test_listesi:
             try:
-                df = data[hisse].dropna() if len(hisseler) > 1 else data.dropna()
+                df = data[hisse].dropna() if len(test_listesi) > 1 else data.dropna()
                 if len(df) < 200: continue
                 
                 df['EMA200'] = df['Close'].ewm(span=200, adjust=False).mean()
                 df['ST_YON'] = hesapla_supertrend(df)
                 
                 son, once = df.iloc[-1], df.iloc[-2]
-                fiyat = float(son['Close'])
-                ema = float(son['EMA200'])
+                fiyat, ema = float(son['Close']), float(son['EMA200'])
                 gecmis = "".join(["🟩" if x == 1 else "🟥" for x in df['ST_YON'].tail(5).tolist()])
                 
+                # Sinyal Karar Mekanizması
                 if once['ST_YON'] == -1 and son['ST_YON'] == 1 and fiyat > ema:
                     d, r, o = "YENİ AL SİNYALİ", "bg-success", 1
                 elif once['ST_YON'] == 1 and son['ST_YON'] == -1 and fiyat < ema:
