@@ -1,92 +1,64 @@
-from flask import Flask, render_template
-import yfinance as yf
-import pandas_ta as ta
-import pandas as pd
-import warnings
 import os
-from concurrent.futures import ThreadPoolExecutor, as_completed
-
-warnings.filterwarnings('ignore')
+import yfinance as yf
+import pandas as pd
+import numpy as np
+from flask import Flask, render_template
 
 app = Flask(__name__)
 
-# TXT dosyasından hisseleri okuyan fonksiyon
-def hisseleri_getir():
-    dosya_yolu = "hisseler.txt"
-    if os.path.exists(dosya_yolu):
-        with open(dosya_yolu, "r", encoding="utf-8") as file:
-            # Satır satır oku, boşlukları temizle ve listeye ekle
-            hisseler = [line.strip() for line in file if line.strip()]
-        return hisseler
-    else:
-        print(f"⚠️ HATA: {dosya_yolu} bulunamadı!")
-        return []
-
-def hisse_analiz_et(hisse):
-    try:
-        ticker = yf.Ticker(hisse)
-        df = ticker.history(period="1y")
-        
-        if df.empty or len(df) < 200:
-            return None
-            
-        df.ta.ema(length=200, append=True)
-        df.ta.supertrend(length=10, multiplier=3, append=True)
-        
-        st_yon_sutunu = [col for col in df.columns if col.startswith('SUPERTd')][0]
-        ema_sutunu = [col for col in df.columns if col.startswith('EMA_200')][0]
-        
-        son_gun = df.iloc[-1]
-        onceki_gun = df.iloc[-2]
-        
-        fiyat = son_gun['Close']
-        ema = son_gun[ema_sutunu]
-        
-        son_5_gun = df.tail(5)
-        gecmis_gorsel = "".join(["🟩" if row[st_yon_sutunu] == 1 else "🟥" for _, row in son_5_gun.iterrows()])
-        
-        if onceki_gun[st_yon_sutunu] == -1 and son_gun[st_yon_sutunu] == 1 and fiyat > ema:
-            durum = "YENİ AL SİNYALİ"
-            renk_class = "bg-success"
-            oncelik = 1
-        elif onceki_gun[st_yon_sutunu] == 1 and son_gun[st_yon_sutunu] == -1 and fiyat < ema:
-            durum = "YENİ SAT SİNYALİ"
-            renk_class = "bg-danger"
-            oncelik = 2
-        else:
-            durum = "Yükseliş Trendi" if son_gun[st_yon_sutunu] == 1 else "Düşüş Trendi"
-            renk_class = "bg-primary" if son_gun[st_yon_sutunu] == 1 else "bg-secondary"
-            oncelik = 3 if son_gun[st_yon_sutunu] == 1 else 4
-            
-        return {
-            "hisse": hisse.replace(".IS", ""),
-            "fiyat": round(fiyat, 2),
-            "durum": durum,
-            "renk_class": renk_class,
-            "gecmis": gecmis_gorsel,
-            "oncelik": oncelik
-        }
-    except Exception as e:
-        print(f"Hata ({hisse}): {e}")
-        return None
+# Kendi SuperTrend Fonksiyonumuz (pandas_ta kütüphanesine gerek kalmadı!)
+def hesapla_supertrend(df, period=10, multiplier=3):
+    if len(df) < period: return np.zeros(len(df))
+    hl2 = (df['High'] + df['Low']) / 2
+    atr = (df['High'] - df['Low']).abs().rolling(window=period).mean()
+    upperband = hl2 + (multiplier * atr)
+    lowerband = hl2 - (multiplier * atr)
+    trend = np.ones(len(df))
+    for i in range(1, len(df)):
+        if df['Close'].iloc[i] > upperband.iloc[i-1]: trend[i] = 1
+        elif df['Close'].iloc[i] < lowerband.iloc[i-1]: trend[i] = -1
+        else: trend[i] = trend[i-1]
+    return trend
 
 @app.route('/')
 def index():
     sonuclar = []
-    # Hisseleri txt dosyasından taze olarak çek
-    bist_listesi = hisseleri_getir()
-    
-    with ThreadPoolExecutor(max_workers=20) as executor:
-        gelecek_sonuclar = {executor.submit(hisse_analiz_et, hisse): hisse for hisse in bist_listesi}
+    try:
+        # Şimdilik sadece 3 hisse ile test edelim, site açılınca hisseler.txt'ye bağlarız
+        hisseler = ["THYAO.IS", "AKBNK.IS", "EREGL.IS"]
         
-        for gelecek in as_completed(gelecek_sonuclar):
-            veri = gelecek.result()
-            if veri is not None:
-                sonuclar.append(veri)
+        for hisse in hisseler:
+            try:
+                df = yf.download(hisse, period="1y", interval="1d", progress=False)
+                if df.empty: continue
                 
-    sonuclar = sorted(sonuclar, key=lambda x: (x['oncelik'], x['hisse']))
+                # Multi-index hatasını engelle
+                if isinstance(df.columns, pd.MultiIndex):
+                    df.columns = df.columns.get_level_values(0)
+
+                df['EMA200'] = df['Close'].ewm(span=200, adjust=False).mean()
+                df['ST_YON'] = hesapla_supertrend(df)
                 
-    return render_template('index.html', hisseler=sonuclar)
+                fiyat = float(df['Close'].iloc[-1])
+                ema200 = float(df['EMA200'].iloc[-1])
+                
+                sonuclar.append({
+                    "hisse": hisse.replace(".IS",""),
+                    "fiyat": round(fiyat, 2),
+                    "durum": "Sistem Başarıyla Çalışıyor!",
+                    "renk_class": "bg-success" if fiyat > ema200 else "bg-danger",
+                    "gecmis": "---",
+                    "oncelik": 1
+                })
+            except Exception as e:
+                print(f"Hata: {e}")
+                continue
+
+        return render_template('index.html', hisseler=sonuclar)
+    
+    except Exception as e:
+        return f"Kod içi hata oluştu: {str(e)}"
 
 if __name__ == '__main__':
-    app.run(debug=True)
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host='0.0.0.0', port=port)
